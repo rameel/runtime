@@ -2642,18 +2642,9 @@ namespace System
         {
             // "s" is an unfortunate parameter name, but we need to keep it for backward compat.
 
-            if (s == null)
-            {
-                ThrowHelper.ThrowArgumentNullException(ExceptionArgument.s);
-            }
+            ArgumentNullException.ThrowIfNull(s);
 
-            unsafe
-            {
-                fixed (char* sPtr = s)
-                {
-                    return FromBase64CharPtr(sPtr, s.Length);
-                }
-            }
+            return FromBase64Chars(s);
         }
 
         public static bool TryFromBase64String(string s, Span<byte> bytes, out int bytesWritten)
@@ -2803,13 +2794,7 @@ namespace System
                 return Array.Empty<byte>();
             }
 
-            unsafe
-            {
-                fixed (char* inArrayPtr = &inArray[0])
-                {
-                    return FromBase64CharPtr(inArrayPtr + offset, length);
-                }
-            }
+            return FromBase64Chars(inArray.AsSpan(offset, length));
         }
 
         /// <summary>
@@ -2818,27 +2803,18 @@ namespace System
         ///  - Allocate new result array based on computation;
         ///  - Decode input into the new array;
         /// </summary>
-        /// <param name="inputPtr">Pointer to the first input char</param>
-        /// <param name="inputLength">Number of input chars</param>
-        /// <returns></returns>
-        private static unsafe byte[] FromBase64CharPtr(char* inputPtr, int inputLength)
+        private static unsafe byte[] FromBase64Chars(ReadOnlySpan<char> chars)
         {
-            // The validity of parameters much be checked by callers, thus we are Critical here.
-
-            Debug.Assert(0 <= inputLength);
-
-            // We need to get rid of any trailing white spaces.
-            // Otherwise we would be rejecting input such as "abc= ":
-            while (inputLength > 0)
+            while (chars.Length != 0)
             {
-                int lastChar = inputPtr[inputLength - 1];
-                if (lastChar != (int)' ' && lastChar != (int)'\n' && lastChar != (int)'\r' && lastChar != (int)'\t')
+                if (chars[^1] is not (' ' or '\n' or '\r' or '\t'))
                     break;
-                inputLength--;
+
+                chars = chars.Slice(0, s.Length - 1);
             }
 
             // Compute the output length:
-            int resultLength = FromBase64_ComputeResultLength(inputPtr, inputLength);
+            int resultLength = FromBase64_ComputeResultLength(chars);
 
             Debug.Assert(0 <= resultLength);
 
@@ -2849,7 +2825,7 @@ namespace System
             byte[] decodedBytes = new byte[resultLength];
 
             // Convert Base64 chars into bytes:
-            if (!TryFromBase64Chars(new ReadOnlySpan<char>(inputPtr, inputLength), decodedBytes, out int _))
+            if (!TryFromBase64Chars(chars, decodedBytes, out int _))
                 throw new FormatException(SR.Format_BadBase64Char);
 
             // Note that the number of bytes written can differ from resultLength if the caller is modifying the array
@@ -2865,51 +2841,40 @@ namespace System
         /// Walk the entire input counting white spaces and padding chars, then compute result length
         /// based on 3 bytes per 4 chars.
         /// </summary>
-        private static unsafe int FromBase64_ComputeResultLength(char* inputPtr, int inputLength)
+        private static unsafe int FromBase64_ComputeResultLength(ReadOnlySpan<char chars)
         {
-            const uint intEq = (uint)'=';
-            const uint intSpace = (uint)' ';
-
-            Debug.Assert(0 <= inputLength);
-
-            char* inputEndPtr = inputPtr + inputLength;
-            int usefulInputLength = inputLength;
+            int usefulLength = chars.Length;
             int padding = 0;
 
-            while (inputPtr < inputEndPtr)
+            foreach (var c in chars)
             {
-                uint c = (uint)(*inputPtr);
-                inputPtr++;
-
-                // We want to be as fast as possible and filter out spaces with as few comparisons as possible.
-                // We end up accepting a number of illegal chars as legal white-space chars.
-                // This is ok: as soon as we hit them during actual decode we will recognise them as illegal and throw.
-                if (c <= intSpace)
-                    usefulInputLength--;
-                else if (c == intEq)
+                switch (c)
                 {
-                    usefulInputLength--;
-                    padding++;
+                    case '=':
+                        usefulLength--;
+                        break;
+
+                    // We want to be as fast as possible and filter out spaces with as few comparisons as possible.
+                    // We end up accepting a number of illegal chars as legal white-space chars.
+                    // This is ok: as soon as we hit them during actual decode we will recognise them as illegal and throw.
+                    case c <= ' ':
+                        usefulLength--;
+                        padding++;
                 }
             }
 
-            Debug.Assert(0 <= usefulInputLength);
-
             // For legal input, we can assume that 0 <= padding < 3. But it may be more for illegal input.
             // We will notice it at decode when we see a '=' at the wrong place.
-            Debug.Assert(0 <= padding);
 
             // Perf: reuse the variable that stored the number of '=' to store the number of bytes encoded by the
             // last group that contains the '=':
-            if (padding != 0)
+            padding = padding switch
             {
-                if (padding == 1)
-                    padding = 2;
-                else if (padding == 2)
-                    padding = 1;
-                else
-                    throw new FormatException(SR.Format_BadBase64Char);
-            }
+                0 => 0,
+                1 => 2,
+                2 => 1,
+                _ => throw new FormatException(SR.Format_BadBase64Char)
+            };
 
             // Done:
             return (usefulInputLength / 4) * 3 + padding;
